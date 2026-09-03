@@ -1,3 +1,5 @@
 flask
 flask-cors
-huggingface_hub
+google-genai
+python-dotenv
+gunicorn
