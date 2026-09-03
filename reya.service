@@ -1,0 +1,15 @@
+[Unit]
+Description=Reya Chatbot (Gunicorn)
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/reya-chatbot
+Environment="PATH=/home/ubuntu/reya-chatbot/venv/bin"
+EnvironmentFile=/home/ubuntu/reya-chatbot/.env
+ExecStart=/home/ubuntu/reya-chatbot/venv/bin/gunicorn --workers 2 --bind 0.0.0.0:5000 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
