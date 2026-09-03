@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.env
+*.env
+
+# Node
+frontend/node_modules/
+frontend/build/
+node_modules/
+
+# Database (contains chat history - exclude from version control)
+memory.db
+
+# Test files with secrets
+test_hf.py
+test_stream.py
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log
