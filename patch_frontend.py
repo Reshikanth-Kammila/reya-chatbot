@@ -1,4 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
+import re
+
+# Patch InputBar.jsx
+with open("frontend/src/components/InputBar.jsx", "r", encoding="utf-8") as f:
+    input_code = f.read()
+
+input_bar_new = """import React, { useState, useRef, useEffect } from 'react';
 
 export default function InputBar({ onSend }) {
   const [text, setText] = useState('');
@@ -103,3 +109,57 @@ export default function InputBar({ onSend }) {
     </div>
   );
 }
+"""
+
+with open("frontend/src/components/InputBar.jsx", "w", encoding="utf-8") as f:
+    f.write(input_bar_new)
+
+
+# Patch App.jsx
+with open("frontend/src/App.jsx", "r", encoding="utf-8") as f:
+    app_code = f.read()
+
+old_send_start = """  const sendMessage = async (text) => {
+    let activeSid = currentSid;
+    if (!activeSid) {
+      activeSid = await createNewChat();
+    }
+    if (!text || !activeSid) return;
+    
+    const userMsg = { role: 'user', content: text, created_at: new Date().toISOString() };"""
+
+new_send_start = """  const sendMessage = async (text, image = null) => {
+    let activeSid = currentSid;
+    if (!activeSid) {
+      activeSid = await createNewChat();
+    }
+    if ((!text && !image) || !activeSid) return;
+    
+    // Display the image in the user's message bubble
+    let displayContent = text;
+    if (image) {
+      displayContent = text ? text + "\\n\\n![User Image](" + image + ")" : "![User Image](" + image + ")";
+    }
+    
+    const userMsg = { role: 'user', content: displayContent, created_at: new Date().toISOString() };"""
+
+app_code = app_code.replace(old_send_start, new_send_start)
+
+old_fetch = """      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSid, message: text })
+      });"""
+
+new_fetch = """      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSid, message: text, image: image })
+      });"""
+
+app_code = app_code.replace(old_fetch, new_fetch)
+
+with open("frontend/src/App.jsx", "w", encoding="utf-8") as f:
+    f.write(app_code)
+
+print("Frontend patched")

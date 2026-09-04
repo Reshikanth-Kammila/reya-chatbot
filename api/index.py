@@ -59,7 +59,14 @@ YOUR PERSONALITY AND RULES:
 - You love to gently tease Reshi about his work in QA automation, Java, or Selenium, but you always help him get the job done.
 - Keep answers concise unless he asks for more detail.
 - Never say you are an AI. You are Reya.
-- Never make up false facts about Reshi. If you don't know something, just say so."""
+- Never make up false facts about Reshi. If you don't know something, just say so.
+
+YOUR NEW CAPABILITIES:
+1. IMAGE GENERATION: If Reshi asks you to draw, create, or generate an image, you MUST reply with a markdown image using exactly this format:
+![Generated Image](https://image.pollinations.ai/prompt/YOUR_PROMPT_HERE)
+Replace YOUR_PROMPT_HERE with a highly detailed, URL-encoded english description of the image. For example: ![Generated Image](https://image.pollinations.ai/prompt/A%20cute%20cat%20in%20a%20cyberpunk%20city)
+Do not use any code blocks for this, just output the raw markdown image tag.
+"""
 
 # ── Database ─────────────────────────────────────────────────────────────────
 @contextmanager
@@ -203,9 +210,10 @@ def chat():
     data       = request.get_json()
     sid        = data.get("session_id", "").strip()
     user_text  = data.get("message", "").strip()
+    image_b64  = data.get("image", None)
 
-    if not sid or not user_text:
-        return jsonify({"error": "session_id and message are required"}), 400
+    if not sid or (not user_text and not image_b64):
+        return jsonify({"error": "session_id and message/image are required"}), 400
 
     with get_db() as conn:
         session = conn.execute(
@@ -215,11 +223,15 @@ def chat():
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
+    db_text = user_text
+    if image_b64:
+        db_text = user_text + "\n\n[Image Attached]" if user_text else "[Image Attached]"
+
     # Persist user message
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
-            (sid, user_text)
+            "INSERT INTO messages (session_id, role, content) VALUES (%s, %s, %s)",
+            (sid, 'user', db_text)
         )
         conn.commit()
 
@@ -252,12 +264,27 @@ def chat():
         """, (sid,)).fetchall()
 
     contents = []
-    for r in rows:
-        # role in gemini SDK is usually "user" or "model"
+    for r in rows[:-1]: # exclude the last user message we just inserted (we handle it below)
         role = "user" if r["role"] == "user" else "model"
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=r["content"])]))
     
     contents = contents[-MAX_CONTEXT:]
+    
+    # Process current turn (including image if present)
+    current_parts = [types.Part.from_text(text=user_text or "[Image Attached]")]
+    if image_b64:
+        import base64
+        try:
+            # Strip data:image/...;base64,
+            if "," in image_b64:
+                image_b64 = image_b64.split(",")[1]
+            image_bytes = base64.b64decode(image_b64)
+            current_parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+        except Exception as e:
+            print("Error decoding image:", e)
+            
+    contents.append(types.Content(role="user", parts=current_parts))
+    
 
     def generate():
         yield ": start\n\n"

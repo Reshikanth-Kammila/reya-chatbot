@@ -95,14 +95,20 @@ function App() {
     }
   };
 
-  const sendMessage = async (text) => {
+  const sendMessage = async (text, image = null) => {
     let activeSid = currentSid;
     if (!activeSid) {
       activeSid = await createNewChat();
     }
-    if (!text || !activeSid) return;
+    if ((!text && !image) || !activeSid) return;
     
-    const userMsg = { role: 'user', content: text, created_at: new Date().toISOString() };
+    // Display the image in the user's message bubble
+    let displayContent = text;
+    if (image) {
+      displayContent = text ? text + "\n\n![User Image](" + image + ")" : "![User Image](" + image + ")";
+    }
+    
+    const userMsg = { role: 'user', content: displayContent, created_at: new Date().toISOString() };
     const botMsg = { role: 'assistant', content: '', created_at: new Date().toISOString() };
     
     setMessages((prev) => [...prev, userMsg, botMsg]);
@@ -112,7 +118,7 @@ function App() {
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: activeSid, message: text })
+        body: JSON.stringify({ session_id: activeSid, message: text, image: image })
       });
       
       const reader = res.body.getReader();
