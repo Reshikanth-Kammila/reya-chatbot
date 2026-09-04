@@ -1,4 +1,7 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
+from psycopg2 import pool
+from contextlib import contextmanager
 import os
 import uuid
 import json
@@ -15,7 +18,10 @@ CORS(app)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL_ID  = "gemini-3.5-flash"
-DB_PATH   = os.path.join(os.path.dirname(__file__), "memory.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set")
+db_pool = pool.ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
 # Max messages sent to the model per session (sliding window)
 MAX_CONTEXT = 60
@@ -48,52 +54,51 @@ YOUR PERSONALITY AND RULES:
 - Never make up false facts about Reshi. If you don't know something, just say so."""
 
 # ── Database ─────────────────────────────────────────────────────────────────
+@contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    class DBWrapper:
+        def __init__(self, conn):
+            self.conn = conn
+        def execute(self, query, params=()):
+            query = query.replace('?', '%s')
+            cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(query, params)
+            return cursor
+        def commit(self):
+            self.conn.commit()
+        def close(self):
+            self.conn.close()
+    
+    conn = db_pool.getconn()
+    try:
+        yield DBWrapper(conn)
+    finally:
+        db_pool.putconn(conn)
 
 
 def init_db():
-    """Create tables and migrate old schema if needed."""
+    """Create tables for Postgres."""
     with get_db() as conn:
         # Sessions table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
                 title      TEXT NOT NULL DEFAULT 'New Chat',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
-        # Check if messages table already exists with old schema (no session_id)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
-
-        if not cols:
-            # Fresh install — create messages table
-            conn.execute("""
-                CREATE TABLE messages (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                    role       TEXT    NOT NULL,
-                    content    TEXT    NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-        elif "session_id" not in cols:
-            # Old schema — migrate: wrap all old messages into a "Legacy Chat" session
-            legacy_id = str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO sessions (id, title) VALUES (?, ?)",
-                (legacy_id, "Legacy Chat")
+        # Messages table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id         SERIAL PRIMARY KEY,
+                session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                role       TEXT    NOT NULL,
+                content    TEXT    NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT")
-            conn.execute(
-                "UPDATE messages SET session_id = ?", (legacy_id,)
-            )
-
+        """)
         conn.commit()
 
 
