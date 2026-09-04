@@ -269,7 +269,7 @@ def chat():
                 top_p=0.9,
             )
 
-            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "nvidia/meta/llama-3.1-70b-instruct"]
+            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "nvidia/nemotron-3-ultra-550b-a55b"]
             stream_iter = None
             first_chunk_text = None
             last_error = None
