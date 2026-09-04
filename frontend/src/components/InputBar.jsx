@@ -70,7 +70,7 @@ export default function InputBar({ onSend }) {
 
   return (
     <div className="input-wrapper">
-      <div style={{ maxWidth: '840px', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+      <div style={{ maxWidth: '840px', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', pointerEvents: 'auto' }}>
         {imagePreview && (
           <div className="image-preview" style={{ marginBottom: '12px', marginLeft: '48px', position: 'relative', display: 'inline-block' }}>
             <img src={imagePreview} alt="Preview" style={{ height: '64px', borderRadius: '8px', border: '1px solid var(--border)', objectFit: 'cover' }} />

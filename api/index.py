@@ -296,7 +296,7 @@ def chat():
                 top_p=0.9,
             )
 
-            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "nvidia/nemotron-3-ultra-550b-a55b"]
+            models_to_try = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro-latest", "gemini-1.0-pro", "nvidia/nemotron-3-ultra-550b-a55b"]
             stream_iter = None
             first_chunk_text = None
             last_error = None
@@ -357,7 +357,8 @@ def chat():
                         
                 except Exception as e:
                     err_str = str(e).lower()
-                    if "503" in err_str or "429" in err_str or "unavailable" in err_str or "demand" in err_str:
+                    # Skip to next model on ANY model availability or traffic issue
+                    if any(err in err_str for err in ["503", "429", "404", "unavailable", "demand", "not found"]):
                         last_error = e
                         continue
                     else:
