@@ -249,3 +249,6 @@ textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99
   .input-wrapper { padding: 0 16px 20px; }
   .chat-area { padding: 16px 16px 110px; }
 }
+. b u b b l e   i m g   {   m a x - w i d t h :   1 0 0 % ;   b o r d e r - r a d i u s :   8 p x ;   m a r g i n - t o p :   8 p x ;   o b j e c t - f i t :   c o n t a i n ;   }  
+ 
+.bubble img { max-width: 100%; border-radius: 8px; margin-top: 8px; object-fit: contain; }
