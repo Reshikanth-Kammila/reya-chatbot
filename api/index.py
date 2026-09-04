@@ -9,6 +9,14 @@ from flask import Flask, request, jsonify, render_template, Response
 from flask_cors import CORS
 from google import genai
 from google.genai import types
+from openai import OpenAI
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+nvidia_client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=NVIDIA_API_KEY
+) if NVIDIA_API_KEY else None
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -261,26 +269,65 @@ def chat():
                 top_p=0.9,
             )
 
-            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "nvidia/meta/llama-3.1-70b-instruct"]
             stream_iter = None
-            first_chunk = None
+            first_chunk_text = None
             last_error = None
 
             for m_id in models_to_try:
                 try:
-                    raw_stream = client.models.generate_content_stream(
-                        model=m_id,
-                        contents=contents,
-                        config=config
-                    )
-                    iterator = iter(raw_stream)
-                    try:
-                        first_chunk = next(iterator)
-                    except StopIteration:
-                        first_chunk = None
-                    
-                    stream_iter = iterator
-                    break  # Success! Stop falling back.
+                    if m_id.startswith("nvidia/"):
+                        if not nvidia_client:
+                            continue
+                        # Use OpenAI SDK for Nvidia
+                        actual_model = m_id.replace("nvidia/", "")
+                        # Build openai messages format
+                        oai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                        for r in rows:
+                            role = "user" if r["role"] == "user" else "assistant"
+                            oai_messages.append({"role": role, "content": r["content"]})
+                            
+                        raw_stream = nvidia_client.chat.completions.create(
+                            model=actual_model,
+                            messages=oai_messages,
+                            temperature=0.72,
+                            top_p=0.9,
+                            stream=True
+                        )
+                        
+                        def oai_iterator(stream):
+                            for chunk in stream:
+                                if chunk.choices and chunk.choices[0].delta.content:
+                                    yield chunk.choices[0].delta.content
+                                    
+                        iterator = oai_iterator(raw_stream)
+                        try:
+                            first_chunk_text = next(iterator)
+                        except StopIteration:
+                            first_chunk_text = None
+                        stream_iter = iterator
+                        break
+
+                    else:
+                        # Use Google GenAI SDK
+                        raw_stream = client.models.generate_content_stream(
+                            model=m_id,
+                            contents=contents,
+                            config=config
+                        )
+                        def gemini_iterator(stream):
+                            for chunk in stream:
+                                if chunk.text:
+                                    yield chunk.text
+                                    
+                        iterator = gemini_iterator(raw_stream)
+                        try:
+                            first_chunk_text = next(iterator)
+                        except StopIteration:
+                            first_chunk_text = None
+                        stream_iter = iterator
+                        break  # Success! Stop falling back.
+                        
                 except Exception as e:
                     err_str = str(e).lower()
                     if "503" in err_str or "429" in err_str or "unavailable" in err_str or "demand" in err_str:
@@ -290,20 +337,19 @@ def chat():
                         raise e
             
             if stream_iter is None:
-                raise last_error or Exception("All Gemini models failed to respond due to high demand.")
+                raise last_error or Exception("All models failed to respond due to high demand.")
 
             if auto_titled:
                 yield f"data: {json.dumps({'event': 'title', 'title': session_title})}\n\n"
 
-            if first_chunk and first_chunk.text:
-                full_reply += first_chunk.text
-                yield f"data: {json.dumps({'event': 'chunk', 'text': first_chunk.text})}\n\n"
+            if first_chunk_text:
+                full_reply += first_chunk_text
+                yield f"data: {json.dumps({'event': 'chunk', 'text': first_chunk_text})}\n\n"
 
-            for chunk in stream_iter:
-                token = chunk.text
-                if token:
-                    full_reply += token
-                    yield f"data: {json.dumps({'event': 'chunk', 'text': token})}\n\n"
+            for token_text in stream_iter:
+                if token_text:
+                    full_reply += token_text
+                    yield f"data: {json.dumps({'event': 'chunk', 'text': token_text})}\n\n"
 
             # Persist assistant reply
             with get_db() as conn:
