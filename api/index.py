@@ -255,20 +255,51 @@ def chat():
         yield ": start\n\n"
         full_reply = ""
         try:
-            response_stream = client.models.generate_content_stream(
-                model=MODEL_ID,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.72,
-                    top_p=0.9,
-                )
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.72,
+                top_p=0.9,
             )
+
+            models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            stream_iter = None
+            first_chunk = None
+            last_error = None
+
+            for m_id in models_to_try:
+                try:
+                    raw_stream = client.models.generate_content_stream(
+                        model=m_id,
+                        contents=contents,
+                        config=config
+                    )
+                    iterator = iter(raw_stream)
+                    try:
+                        first_chunk = next(iterator)
+                    except StopIteration:
+                        first_chunk = None
+                    
+                    stream_iter = iterator
+                    break  # Success! Stop falling back.
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "503" in err_str or "429" in err_str or "unavailable" in err_str or "demand" in err_str:
+                        last_error = e
+                        continue
+                    else:
+                        raise e
             
+            if stream_iter is None:
+                raise last_error or Exception("All Gemini models failed to respond due to high demand.")
+
             if auto_titled:
                 yield f"data: {json.dumps({'event': 'title', 'title': session_title})}\n\n"
 
-            for chunk in response_stream:
+            if first_chunk and first_chunk.text:
+                full_reply += first_chunk.text
+                yield f"data: {json.dumps({'event': 'chunk', 'text': first_chunk.text})}\n\n"
+
+            for chunk in stream_iter:
                 token = chunk.text
                 if token:
                     full_reply += token
