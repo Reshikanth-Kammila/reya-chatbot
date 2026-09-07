@@ -13,12 +13,6 @@
       "use": "@vercel/python"
     }
   ],
-  "crons": [
-    {
-      "path": "/cron-check",
-      "schedule": "* * * * *"
-    }
-  ],
   "routes": [
     { "src": "/sessions(.*)",    "dest": "/api/index.py" },
     { "src": "/chat(.*)",        "dest": "/api/index.py" },
