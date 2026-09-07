@@ -296,7 +296,7 @@ def chat():
                 top_p=0.9,
             )
 
-            models_to_try = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro-latest", "gemini-1.0-pro", "nvidia/nemotron-3-ultra-550b-a55b"]
+            models_to_try = ["gemini-3.5-flash", "gemini-2.5-flash", "nvidia/nemotron-3-ultra-550b-a55b"]
             stream_iter = None
             first_chunk_text = None
             last_error = None
@@ -307,7 +307,7 @@ def chat():
                         if not nvidia_client:
                             continue
                         # Use OpenAI SDK for Nvidia
-                        actual_model = m_id.replace("nvidia/", "")
+                        actual_model = m_id
                         # Build openai messages format
                         oai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                         for r in rows:
