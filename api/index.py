@@ -262,35 +262,20 @@ def execute_tool(intent, user_text):
     elif tool == "create_reminder":
         title      = intent.get("title", user_text)
         remind_str = intent.get("remind_at_ist", "")
-        email      = REMINDER_EMAIL
+        # Call the calendar tool to create a 15-minute event with a 0-minute notification
+        intent["summary"] = f"Reminder: {title}"
+        intent["start_ist"] = remind_str
         try:
             ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
             remind_dt = datetime.datetime.strptime(remind_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
-            remind_utc = remind_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-            with get_db() as conn:
-                conn.execute(
-                    "INSERT INTO reminders (title, remind_at, email) VALUES (%s, %s, %s)",
-                    (title, remind_utc, email)
-                )
-                conn.commit()
-            return f"⏰ Reminder set: **{title}** at {remind_str} IST → will email {email}"
+            end_dt = remind_dt + datetime.timedelta(minutes=15)
+            intent["end_ist"] = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            return execute_calendar_tool(intent, "create_event", is_reminder=True)
         except Exception as e:
             return f"❌ Could not parse reminder time: {remind_str}. Error: {e}"
 
     elif tool == "get_reminders":
-        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT id, title, remind_at, sent FROM reminders ORDER BY remind_at ASC"
-            ).fetchall()
-        if not rows:
-            return "📭 No reminders set."
-        result = []
-        for r in rows:
-            remind_ist = r['remind_at'].replace(tzinfo=datetime.timezone.utc).astimezone(ist)
-            status = "✅ Sent" if r['sent'] else "⏳ Pending"
-            result.append(f"- **#{r['id']}** {r['title']} → {remind_ist.strftime('%d %b %Y %I:%M %p IST')} [{status}]")
-        return f"⏰ Your reminders:\n" + "\n".join(result)
+        return execute_calendar_tool(intent, "get_calendar")
 
     # ── GOOGLE CALENDAR ──────────────────────────────────────────────────────
     elif tool in ("get_calendar", "create_event"):
@@ -299,7 +284,7 @@ def execute_tool(intent, user_text):
     return None
 
 
-def execute_calendar_tool(intent, tool):
+def execute_calendar_tool(intent, tool, is_reminder=False):
     """Interact with Google Calendar API."""
     try:
         from google.oauth2.credentials import Credentials
@@ -360,14 +345,26 @@ def execute_calendar_tool(intent, tool):
             desc     = intent.get("description", "")
             start_dt = datetime.datetime.strptime(start_s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
             end_dt   = datetime.datetime.strptime(end_s,   "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
+            
             event = {
                 "summary": summary,
                 "description": desc,
                 "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Kolkata"},
                 "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "Asia/Kolkata"},
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [
+                        {"method": "email", "minutes": 0},
+                        {"method": "popup", "minutes": 0}
+                    ]
+                }
             }
             created = service.events().insert(calendarId="primary", body=event).execute()
-            return f"📅 Event created: **{summary}** on {start_s} IST. [View]({created.get('htmlLink', '#')})"
+            
+            if is_reminder:
+                return f"⏰ Reminder synced to Google Calendar: **{summary}** at {start_s} IST (you will get an email and push notification). [View Calendar]({created.get('htmlLink', '#')})"
+            else:
+                return f"📅 Event created: **{summary}** on {start_s} IST (with calendar notifications). [View]({created.get('htmlLink', '#')})"
 
     except Exception as e:
         return f"❌ Calendar error: {e}"
