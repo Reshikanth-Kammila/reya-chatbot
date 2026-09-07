@@ -718,6 +718,9 @@ def chat():
             if auto_titled:
                 yield f"data: {json.dumps({'event': 'title', 'title': session_title})}\n\n"
 
+            if tool_result:
+                yield f"data: {json.dumps({'event': 'chunk', 'text': f'[DEBUG] Tool Result: {tool_result}\\n\\n'})}\n\n"
+
             if first_chunk_text:
                 full_reply += first_chunk_text
                 yield f"data: {json.dumps({'event': 'chunk', 'text': first_chunk_text})}\n\n"
