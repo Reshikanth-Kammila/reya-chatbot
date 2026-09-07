@@ -679,10 +679,11 @@ def chat():
             last_error        = None
 
             for m_id in models_to_try:
-                try:
-                    if m_id.startswith("nvidia/"):
-                        if not nvidia_client:
-                            continue
+                success = False
+                if m_id.startswith("nvidia/"):
+                    if not nvidia_client:
+                        continue
+                    try:
                         oai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                         for r in rows:
                             role = "user" if r["role"] == "user" else "assistant"
@@ -704,30 +705,39 @@ def chat():
                         except StopIteration:
                             first_chunk_text = None
                         stream_iter = iterator
-                        break
-                    else:
-                        raw_stream = client.models.generate_content_stream(
-                            model=m_id, contents=contents, config=config
-                        )
-                        def gemini_iterator(stream):
-                            for chunk in stream:
-                                if chunk.text:
-                                    yield chunk.text
-                        iterator = gemini_iterator(raw_stream)
-                        try:
-                            first_chunk_text = next(iterator)
-                        except StopIteration:
-                            first_chunk_text = None
-                        stream_iter = iterator
-                        break
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if any(err in err_str for err in ["503", "429", "404", "unavailable", "demand", "not found"]):
+                        success = True
+                    except Exception as e:
                         last_error = e
-                        continue
-                    else:
-                        raise e
-
+                else:
+                    for key in GEMINI_KEYS:
+                        try:
+                            local_client = genai.Client(api_key=key)
+                            raw_stream = local_client.models.generate_content_stream(
+                                model=m_id, contents=contents, config=config
+                            )
+                            def gemini_iterator(stream):
+                                for chunk in stream:
+                                    if chunk.text:
+                                        yield chunk.text
+                            iterator = gemini_iterator(raw_stream)
+                            try:
+                                first_chunk_text = next(iterator)
+                            except StopIteration:
+                                first_chunk_text = None
+                            stream_iter = iterator
+                            success = True
+                            break
+                        except Exception as e:
+                            err_str = str(e).lower()
+                            if "429" in err_str or "quota" in err_str or "exhausted" in err_str:
+                                last_error = e
+                                continue
+                            if any(err in err_str for err in ["503", "404", "unavailable", "demand", "not found"]):
+                                last_error = e
+                                break
+                            raise e
+                if success:
+                    break
             if stream_iter is None:
                 raise last_error or Exception("All models failed.")
 
