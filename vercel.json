@@ -20,33 +20,12 @@
     }
   ],
   "routes": [
-    {
-      "src": "/sessions(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/chat(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/notes(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/reminders(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/auth(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/cron-check(.*)",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/frontend/$1"
-    }
+    { "src": "/sessions(.*)",    "dest": "/api/index.py" },
+    { "src": "/chat(.*)",        "dest": "/api/index.py" },
+    { "src": "/notes(.*)",       "dest": "/api/index.py" },
+    { "src": "/reminders(.*)",   "dest": "/api/index.py" },
+    { "src": "/auth(.*)",        "dest": "/api/index.py" },
+    { "src": "/cron-check(.*)",  "dest": "/api/index.py" },
+    { "src": "/(.*)",            "dest": "/frontend/$1"  }
   ]
 }
