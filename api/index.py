@@ -19,6 +19,7 @@ load_dotenv()
 
 # ── Clients & Config ──────────────────────────────────────────────────────────
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
+GEMINI_KEYS      = [k.strip() for k in GEMINI_API_KEY.split(",") if k.strip()]
 NVIDIA_API_KEY   = os.getenv("NVIDIA_API_KEY", "")
 RESEND_API_KEY   = os.getenv("RESEND_API_KEY", "")
 REMINDER_EMAIL   = os.getenv("REMINDER_EMAIL", "reshikanth.qa@gmail.com")
@@ -32,7 +33,7 @@ if not DATABASE_URL:
 app = Flask(__name__)
 CORS(app)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Client initialized per request
 if RESEND_API_KEY:
     resend.api_key = RESEND_API_KEY
 
@@ -213,17 +214,23 @@ If it's regular conversation or no tool is needed:
 
 ONLY return JSON. Nothing else."""
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
-        )
-        raw = response.text.strip()
-        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
-        return json.loads(raw)
-    except Exception as e:
-        print("Intent detection error:", e)
-        return {"tool": "chat"}
+    for key in GEMINI_KEYS:
+        try:
+            local_client = genai.Client(api_key=key)
+            response = local_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            )
+            raw = response.text.strip()
+            raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+            return json.loads(raw)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str or "exhausted" in err_str:
+                continue
+            print("Intent detection error:", e)
+            break
+    return {"tool": "chat"}
 
 
 def execute_tool(intent, user_text):
