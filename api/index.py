@@ -166,14 +166,24 @@ def make_title(text):
     return " ".join(words[:5])
 
 
-def detect_tool_intent(user_text):
-    """Use Gemini to parse the user message and detect if a tool should run."""
+def detect_tool_intent(user_text, rows):
+    """Use Gemini to parse the user message and detect if a tool should run, using context."""
     now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
-    prompt = f"""You are a JSON intent classifier. Given the user message below, identify if it requires a tool action.
+    
+    # Build recent context (last 3 messages)
+    history_str = ""
+    if rows:
+        recent = rows[-3:]
+        for r in recent:
+            history_str += f"{r['role'].upper()}: {r['content']}\n"
+
+    prompt = f"""You are a JSON intent classifier. Given the recent conversation and the latest user message, identify if a tool action is explicitly requested.
 
 Current time (IST): {now_ist.strftime("%Y-%m-%d %H:%M:%S IST")}
 
-User message: "{user_text}"
+RECENT CONVERSATION HISTORY:
+{history_str}
+LATEST USER MESSAGE: "{user_text}"
 
 Return ONLY a valid JSON object, no markdown, no explanation. Choose one of these:
 
@@ -183,7 +193,7 @@ If saving/creating a note:
 If viewing notes:
 {{"tool": "get_notes", "query": null}}
 
-If deleting a note (pick up keywords like delete/remove):
+If deleting a note:
 {{"tool": "delete_note", "query": "partial note title or content to match"}}
 
 If setting a reminder (pick up keywords like remind, reminder, alert):
@@ -195,10 +205,10 @@ If viewing reminders:
 If asking about calendar / schedule / events:
 {{"tool": "get_calendar", "date": "YYYY-MM-DD or null for today"}}
 
-If creating a calendar event:
+If creating a calendar event or calendar invite:
 {{"tool": "create_event", "summary": "event title", "start_ist": "YYYY-MM-DD HH:MM:SS", "end_ist": "YYYY-MM-DD HH:MM:SS", "description": ""}}
 
-If it's regular conversation:
+If it's regular conversation or no tool is needed:
 {{"tool": "chat"}}
 
 ONLY return JSON. Nothing else."""
@@ -209,7 +219,6 @@ ONLY return JSON. Nothing else."""
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
         )
         raw = response.text.strip()
-        # Strip markdown code fences if present
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
         return json.loads(raw)
     except Exception as e:
@@ -618,7 +627,7 @@ def chat():
     # ── Tool detection (skip for image-only messages) ─────────────────────────
     tool_result = None
     if user_text and not image_b64:
-        intent = detect_tool_intent(user_text)
+        intent = detect_tool_intent(user_text, rows)
         if intent.get("tool") != "chat":
             tool_result = execute_tool(intent, user_text)
 
