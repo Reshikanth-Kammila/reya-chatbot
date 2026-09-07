@@ -72,7 +72,7 @@ html, body {
 }
 
 /* ── Layout ── */
-.layout { display: flex; height: 100vh; }
+.layout { display: flex; height: 100vh; height: 100dvh; }
 
 /* ══ SIDEBAR ══ */
 .sidebar { width: var(--sidebar-w); min-width: var(--sidebar-w);
@@ -249,6 +249,43 @@ textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99
   .input-wrapper { padding: 0 16px 20px; }
   .chat-area { padding: 16px 16px 110px; }
 }
-.bubble img { max-width: 100%; border-radius: 8px; margin-top: 8px; object-fit: contain; }
-
-.bubble img { max-width: 100%; border-radius: 8px; margin-top: 8px; object-fit: contain; }
+.bubble img { max-width: 100%; border-radius: 8px; margin-top: 8px; object-fit: contain; }
+
+
+
+.bubble img { max-width: 100%; border-radius: 8px; margin-top: 8px; object-fit: contain; }
+
+
+/*  ? ? MOBILE  ? ? */
+.sidebar-overlay { display:none; position:fixed; inset:0; background:rgba(15, 23, 42, 0.3); backdrop-filter: blur(4px); z-index:40; transition: opacity 0.3s; }
+@media (max-width:768px) {
+  .sidebar { position:fixed; top:0; left:0; bottom:0; transform:translateX(-100%);
+    min-width:var(--sidebar-w)!important; width:var(--sidebar-w)!important; }
+  .sidebar.mobile-open { transform:translateX(0); box-shadow: 20px 0 40px rgba(0,0,0,0.1); }
+  .sidebar-overlay.active { display:block; }
+  
+  /* Make message bubbles fit nicely on phones */
+  .message { gap: 10px; }
+  .message.user .bubble-content { max-width: 90%; }
+  .message.user .bubble { padding: 10px 14px; font-size: 15px; border-radius: 20px; }
+  .message.bot .bubble { font-size: 15px; }
+  .bubble h3 { font-size: 16px; }
+  
+  /* Make image previews smaller and aligned on mobile */
+  .image-preview img { height: 48px !important; }
+  .image-preview { margin-left: 10px !important; }
+
+  /* Input bar adjustments for mobile keyboards */
+  .input-wrapper { padding: 0 12px 12px; background: linear-gradient(to top, var(--bg) 80%, transparent); }
+  .input-box { padding: 8px 12px; border-radius: 24px; gap: 8px; }
+  textarea { font-size: 16px; /* 16px prevents iOS from automatically zooming in */ }
+  .input-hint { display: none; /* Hide the desktop shortcut hint on phones */ }
+  
+  .chat-area { padding: 16px 12px 90px; }
+  .welcome { padding-top: 5vh; }
+  .welcome h2 { font-size: 28px; }
+  
+  /* Compact quick cards */
+  .quick-grid { gap: 6px; }
+  .quick-card { padding: 8px 12px; font-size: 12.5px; }
+}
