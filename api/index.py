@@ -218,7 +218,7 @@ ONLY return JSON. Nothing else."""
         try:
             local_client = genai.Client(api_key=key)
             response = local_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash",
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
             )
             raw = response.text.strip()
@@ -673,7 +673,7 @@ def chat():
                 top_p=0.9,
             )
 
-            models_to_try = ["gemini-3.5-flash", "gemini-2.5-flash", "nvidia/nemotron-3-ultra-550b-a55b"]
+            models_to_try = ["gemini-3.5-flash", "nvidia/meta/llama-3.1-70b-instruct"]
             stream_iter       = None
             first_chunk_text  = None
             last_error        = None
