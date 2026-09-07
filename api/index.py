@@ -5,38 +5,45 @@ from contextlib import contextmanager
 import os
 import uuid
 import json
-from flask import Flask, request, jsonify, render_template, Response
+import datetime
+import re
+from flask import Flask, request, jsonify, render_template, Response, redirect
 from flask_cors import CORS
 from google import genai
 from google.genai import types
 from openai import OpenAI
+import resend
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── Clients & Config ──────────────────────────────────────────────────────────
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
+NVIDIA_API_KEY   = os.getenv("NVIDIA_API_KEY", "")
+RESEND_API_KEY   = os.getenv("RESEND_API_KEY", "")
+REMINDER_EMAIL   = os.getenv("REMINDER_EMAIL", "reshikanth.qa@gmail.com")
+DATABASE_URL     = os.getenv("DATABASE_URL")
+MODEL_ID         = "gemini-3.5-flash"
+MAX_CONTEXT      = 60
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set")
+
+app = Flask(__name__)
+CORS(app)
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
+
 nvidia_client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=NVIDIA_API_KEY
 ) if NVIDIA_API_KEY else None
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-app = Flask(__name__)
-CORS(app)
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MODEL_ID  = "gemini-3.5-flash"
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL is not set")
 db_pool = pool.ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
-# Max messages sent to the model per session (sliding window)
-MAX_CONTEXT = 60
-
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-# ── Persona ─────────────────────────────────────────────────────────────────
+# ── Persona ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Reya, the personal AI assistant to Reshikanth Kammila (who goes by Reshi). You are warm, intelligent, and deeply loyal to him.
 
 ABOUT RESHI (YOUR BOSS):
@@ -66,9 +73,15 @@ YOUR NEW CAPABILITIES:
 ![Generated Image](https://image.pollinations.ai/prompt/YOUR_PROMPT_HERE)
 Replace YOUR_PROMPT_HERE with a highly detailed english description of the image. YOU MUST USE HYPHENS (-) INSTEAD OF SPACES. For example: ![Generated Image](https://image.pollinations.ai/prompt/a-cute-cat-in-a-cyberpunk-city)
 Do not use any code blocks for this, just output the raw markdown image tag.
+
+2. NOTES: You can save, read, and delete notes for Reshi. When a tool action has been taken, you will receive a [TOOL_RESULT] message showing what happened. Use it to give a natural, friendly response about the result.
+
+3. REMINDERS: You can set timed reminders that will be emailed to Reshi. When a tool action has been taken, you will receive a [TOOL_RESULT] message showing what happened. Use it to give a natural, friendly response confirming the reminder.
+
+4. CALENDAR: You can view and create events on Reshi's Google Calendar. When a tool action has been taken, you will receive a [TOOL_RESULT] message showing what happened. Use it to give a natural, friendly response about the calendar.
 """
 
-# ── Database ─────────────────────────────────────────────────────────────────
+# ── Database ───────────────────────────────────────────────────────────────────
 @contextmanager
 def get_db():
     class DBWrapper:
@@ -83,7 +96,7 @@ def get_db():
             self.conn.commit()
         def close(self):
             self.conn.close()
-    
+
     conn = db_pool.getconn()
     try:
         yield DBWrapper(conn)
@@ -92,9 +105,8 @@ def get_db():
 
 
 def init_db():
-    """Create tables for Postgres."""
+    """Create all tables for Postgres."""
     with get_db() as conn:
-        # Sessions table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
@@ -103,8 +115,6 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
-        # Messages table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id         SERIAL PRIMARY KEY,
@@ -114,35 +124,382 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Notes table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notes (
+                id         SERIAL PRIMARY KEY,
+                title      TEXT,
+                content    TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Reminders table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reminders (
+                id         SERIAL PRIMARY KEY,
+                title      TEXT NOT NULL,
+                remind_at  TIMESTAMP NOT NULL,
+                email      TEXT NOT NULL DEFAULT 'reshikanth.qa@gmail.com',
+                sent       BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Google Calendar tokens
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS google_tokens (
+                id            SERIAL PRIMARY KEY,
+                access_token  TEXT,
+                refresh_token TEXT,
+                token_expiry  TIMESTAMP,
+                updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
 
 init_db()
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-def make_title(text: str) -> str:
-    """Generate a short session title from the first user message."""
-    t = text.strip().split("\n")[0]          # first line only
-    return (t[:50] + "…") if len(t) > 50 else t
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def make_title(text):
+    words = (text or "New Chat").strip().split()
+    return " ".join(words[:5])
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-@app.route("/")
-def index():
-    from flask import send_from_directory
-    return send_from_directory('frontend/build', 'index.html')
+def detect_tool_intent(user_text):
+    """Use Gemini to parse the user message and detect if a tool should run."""
+    now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+    prompt = f"""You are a JSON intent classifier. Given the user message below, identify if it requires a tool action.
 
-@app.route('/<path:path>')
-def serve_static(path):
-    import os
-    from flask import send_from_directory
-    if os.path.exists(os.path.join('frontend/build', path)):
-        return send_from_directory('frontend/build', path)
-    return "Not Found", 404
+Current time (IST): {now_ist.strftime("%Y-%m-%d %H:%M:%S IST")}
+
+User message: "{user_text}"
+
+Return ONLY a valid JSON object, no markdown, no explanation. Choose one of these:
+
+If saving/creating a note:
+{{"tool": "create_note", "title": "short 3-word title", "content": "full note content"}}
+
+If viewing notes:
+{{"tool": "get_notes", "query": null}}
+
+If deleting a note (pick up keywords like delete/remove):
+{{"tool": "delete_note", "query": "partial note title or content to match"}}
+
+If setting a reminder (pick up keywords like remind, reminder, alert):
+{{"tool": "create_reminder", "title": "reminder description", "remind_at_ist": "YYYY-MM-DD HH:MM:SS"}}
+
+If viewing reminders:
+{{"tool": "get_reminders"}}
+
+If asking about calendar / schedule / events:
+{{"tool": "get_calendar", "date": "YYYY-MM-DD or null for today"}}
+
+If creating a calendar event:
+{{"tool": "create_event", "summary": "event title", "start_ist": "YYYY-MM-DD HH:MM:SS", "end_ist": "YYYY-MM-DD HH:MM:SS", "description": ""}}
+
+If it's regular conversation:
+{{"tool": "chat"}}
+
+ONLY return JSON. Nothing else."""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+        )
+        raw = response.text.strip()
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+        return json.loads(raw)
+    except Exception as e:
+        print("Intent detection error:", e)
+        return {"tool": "chat"}
 
 
-# ── Session CRUD ─────────────────────────────────────────────────────────────
+def execute_tool(intent, user_text):
+    """Execute the detected tool and return a human-readable result string."""
+    tool = intent.get("tool", "chat")
+
+    # ── NOTES ────────────────────────────────────────────────────────────────
+    if tool == "create_note":
+        title   = intent.get("title", "Untitled")
+        content = intent.get("content", user_text)
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO notes (title, content) VALUES (%s, %s)",
+                (title, content)
+            )
+            conn.commit()
+        return f"✅ Note saved successfully: **{title}**"
+
+    elif tool == "get_notes":
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT id, title, content, created_at FROM notes ORDER BY created_at DESC"
+            ).fetchall()
+        if not rows:
+            return "📭 No notes found."
+        notes_list = "\n".join(
+            [f"- **#{r['id']}** ({r['title']}): {r['content'][:100]}" for r in rows]
+        )
+        return f"📝 You have {len(rows)} note(s):\n{notes_list}"
+
+    elif tool == "delete_note":
+        query = intent.get("query", "")
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT id, title FROM notes WHERE title ILIKE %s OR content ILIKE %s LIMIT 1",
+                (f"%{query}%", f"%{query}%")
+            ).fetchone()
+            if row:
+                conn.execute("DELETE FROM notes WHERE id = %s", (row["id"],))
+                conn.commit()
+                return f"🗑️ Deleted note: **{row['title']}**"
+        return "❌ Could not find a note matching that description."
+
+    # ── REMINDERS ────────────────────────────────────────────────────────────
+    elif tool == "create_reminder":
+        title      = intent.get("title", user_text)
+        remind_str = intent.get("remind_at_ist", "")
+        email      = REMINDER_EMAIL
+        try:
+            ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+            remind_dt = datetime.datetime.strptime(remind_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
+            remind_utc = remind_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            with get_db() as conn:
+                conn.execute(
+                    "INSERT INTO reminders (title, remind_at, email) VALUES (%s, %s, %s)",
+                    (title, remind_utc, email)
+                )
+                conn.commit()
+            return f"⏰ Reminder set: **{title}** at {remind_str} IST → will email {email}"
+        except Exception as e:
+            return f"❌ Could not parse reminder time: {remind_str}. Error: {e}"
+
+    elif tool == "get_reminders":
+        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT id, title, remind_at, sent FROM reminders ORDER BY remind_at ASC"
+            ).fetchall()
+        if not rows:
+            return "📭 No reminders set."
+        result = []
+        for r in rows:
+            remind_ist = r['remind_at'].replace(tzinfo=datetime.timezone.utc).astimezone(ist)
+            status = "✅ Sent" if r['sent'] else "⏳ Pending"
+            result.append(f"- **#{r['id']}** {r['title']} → {remind_ist.strftime('%d %b %Y %I:%M %p IST')} [{status}]")
+        return f"⏰ Your reminders:\n" + "\n".join(result)
+
+    # ── GOOGLE CALENDAR ──────────────────────────────────────────────────────
+    elif tool in ("get_calendar", "create_event"):
+        return execute_calendar_tool(intent, tool)
+
+    return None
+
+
+def execute_calendar_tool(intent, tool):
+    """Interact with Google Calendar API."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        import google.auth.transport.requests
+
+        GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+        GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+        GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+
+        if not GOOGLE_REFRESH_TOKEN:
+            return "🔑 Google Calendar is not connected yet. Ask Reshi to visit /auth/google to connect it."
+
+        creds = Credentials(
+            token=None,
+            refresh_token=GOOGLE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        service = build("calendar", "v3", credentials=creds)
+
+        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+        if tool == "get_calendar":
+            date_str = intent.get("date") or datetime.datetime.now(ist).strftime("%Y-%m-%d")
+            day_start = datetime.datetime.strptime(date_str, "%Y-%m-%d").replace(
+                hour=0, minute=0, second=0, tzinfo=ist
+            )
+            day_end = day_start + datetime.timedelta(days=1)
+
+            events_result = service.events().list(
+                calendarId="primary",
+                timeMin=day_start.isoformat(),
+                timeMax=day_end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime"
+            ).execute()
+            events = events_result.get("items", [])
+
+            if not events:
+                return f"📅 No events on {date_str}."
+            lines = [f"📅 Events on {date_str}:"]
+            for ev in events:
+                start = ev["start"].get("dateTime", ev["start"].get("date", "All day"))
+                try:
+                    t = datetime.datetime.fromisoformat(start).astimezone(ist).strftime("%I:%M %p")
+                except:
+                    t = start
+                lines.append(f"- {t}: **{ev.get('summary', 'Untitled')}**")
+            return "\n".join(lines)
+
+        elif tool == "create_event":
+            summary  = intent.get("summary", "New Event")
+            start_s  = intent.get("start_ist", "")
+            end_s    = intent.get("end_ist", "")
+            desc     = intent.get("description", "")
+            start_dt = datetime.datetime.strptime(start_s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
+            end_dt   = datetime.datetime.strptime(end_s,   "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist)
+            event = {
+                "summary": summary,
+                "description": desc,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Kolkata"},
+                "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "Asia/Kolkata"},
+            }
+            created = service.events().insert(calendarId="primary", body=event).execute()
+            return f"📅 Event created: **{summary}** on {start_s} IST. [View]({created.get('htmlLink', '#')})"
+
+    except Exception as e:
+        return f"❌ Calendar error: {e}"
+
+
+# ── Google Auth ────────────────────────────────────────────────────────────────
+@app.route("/auth/google")
+def auth_google():
+    from urllib.parse import urlencode
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+    params = {
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  "https://reya.reshikanth.com/auth/google/callback",
+        "response_type": "code",
+        "scope":         "https://www.googleapis.com/auth/calendar",
+        "access_type":   "offline",
+        "prompt":        "consent",
+    }
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params))
+
+
+@app.route("/auth/google/callback")
+def auth_google_callback():
+    import requests as http_requests
+    code = request.args.get("code", "")
+    GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    token_resp = http_requests.post("https://oauth2.googleapis.com/token", data={
+        "code":          code,
+        "client_id":     GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri":  "https://reya.reshikanth.com/auth/google/callback",
+        "grant_type":    "authorization_code",
+    })
+    data = token_resp.json()
+    refresh_token = data.get("refresh_token", "")
+    if refresh_token:
+        return f"""<html><body style='font-family:sans-serif;padding:40px;'>
+        <h2>✅ Google Calendar Connected!</h2>
+        <p>Copy this refresh token and add it as <strong>GOOGLE_REFRESH_TOKEN</strong> in your Vercel environment variables:</p>
+        <code style='background:#f0f0f0;padding:10px;display:block;word-break:break-all;'>{refresh_token}</code>
+        <p>After saving it in Vercel, redeploy and Reya will be able to manage your calendar!</p>
+        </body></html>"""
+    return f"<pre>Error: {json.dumps(data, indent=2)}</pre>"
+
+
+# ── Cron: Check & Fire Reminders ──────────────────────────────────────────────
+@app.route("/cron-check", methods=["GET", "POST"])
+def cron_check():
+    """Called by Vercel Cron every minute to fire due reminders."""
+    now_utc = datetime.datetime.utcnow()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, email FROM reminders WHERE sent = FALSE AND remind_at <= %s",
+            (now_utc,)
+        ).fetchall()
+
+    sent_count = 0
+    for r in rows:
+        if RESEND_API_KEY:
+            try:
+                resend.Emails.send({
+                    "from":    "Reya <onboarding@resend.dev>",
+                    "to":      [r["email"]],
+                    "subject": f"⏰ Reminder: {r['title']}",
+                    "html":    f"""
+                    <div style='font-family:sans-serif;max-width:480px;margin:40px auto;'>
+                      <h2 style='color:#6c63ff;'>⏰ Reya Reminder</h2>
+                      <p style='font-size:18px;'><strong>{r['title']}</strong></p>
+                      <p style='color:#888;font-size:13px;'>This reminder was set by you in Reya.</p>
+                    </div>"""
+                })
+            except Exception as e:
+                print("Resend error:", e)
+        with get_db() as conn:
+            conn.execute("UPDATE reminders SET sent = TRUE WHERE id = %s", (r["id"],))
+            conn.commit()
+        sent_count += 1
+
+    return jsonify({"fired": sent_count, "checked_at": now_utc.isoformat()})
+
+
+# ── Notes API ─────────────────────────────────────────────────────────────────
+@app.route("/notes", methods=["GET"])
+def list_notes():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, content, created_at FROM notes ORDER BY created_at DESC"
+        ).fetchall()
+    return jsonify({"notes": [dict(r) for r in rows]})
+
+
+@app.route("/notes", methods=["POST"])
+def create_note():
+    data    = request.get_json() or {}
+    title   = data.get("title", "Untitled")
+    content = data.get("content", "").strip()
+    if not content:
+        return jsonify({"error": "content required"}), 400
+    with get_db() as conn:
+        conn.execute("INSERT INTO notes (title, content) VALUES (%s, %s)", (title, content))
+        conn.commit()
+    return jsonify({"status": "ok"}), 201
+
+
+@app.route("/notes/<int:nid>", methods=["DELETE"])
+def delete_note(nid):
+    with get_db() as conn:
+        conn.execute("DELETE FROM notes WHERE id = %s", (nid,))
+        conn.commit()
+    return jsonify({"status": "deleted"})
+
+
+# ── Reminders API ─────────────────────────────────────────────────────────────
+@app.route("/reminders", methods=["GET"])
+def list_reminders():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, remind_at, email, sent, created_at FROM reminders ORDER BY remind_at ASC"
+        ).fetchall()
+    return jsonify({"reminders": [dict(r) for r in rows]})
+
+
+@app.route("/reminders/<int:rid>", methods=["DELETE"])
+def delete_reminder(rid):
+    with get_db() as conn:
+        conn.execute("DELETE FROM reminders WHERE id = %s", (rid,))
+        conn.commit()
+    return jsonify({"status": "deleted"})
+
+
+# ── Sessions ──────────────────────────────────────────────────────────────────
 @app.route("/sessions", methods=["GET"])
 def list_sessions():
     with get_db() as conn:
@@ -164,7 +521,7 @@ def create_session():
             if request.data else "New Chat"
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO sessions (id, title) VALUES (?, ?)", (sid, title)
+            "INSERT INTO sessions (id, title) VALUES (%s, %s)", (sid, title)
         )
         conn.commit()
     return jsonify({"id": sid, "title": title}), 201
@@ -173,8 +530,8 @@ def create_session():
 @app.route("/sessions/<sid>", methods=["DELETE"])
 def delete_session(sid):
     with get_db() as conn:
-        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
-        conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+        conn.execute("DELETE FROM messages WHERE session_id = %s", (sid,))
+        conn.execute("DELETE FROM sessions WHERE id = %s", (sid,))
         conn.commit()
     return jsonify({"status": "deleted"})
 
@@ -186,7 +543,7 @@ def rename_session(sid):
         return jsonify({"error": "Title required"}), 400
     with get_db() as conn:
         conn.execute(
-            "UPDATE sessions SET title = ? WHERE id = ?", (new_title, sid)
+            "UPDATE sessions SET title = %s WHERE id = %s", (new_title, sid)
         )
         conn.commit()
     return jsonify({"status": "ok", "title": new_title})
@@ -198,7 +555,7 @@ def get_messages(sid):
     with get_db() as conn:
         rows = conn.execute("""
             SELECT role, content, created_at
-            FROM messages WHERE session_id = ?
+            FROM messages WHERE session_id = %s
             ORDER BY id ASC
         """, (sid,)).fetchall()
     return jsonify({"messages": [dict(r) for r in rows]})
@@ -207,17 +564,17 @@ def get_messages(sid):
 # ── Chat ──────────────────────────────────────────────────────────────────────
 @app.route("/chat", methods=["POST"])
 def chat():
-    data       = request.get_json()
-    sid        = data.get("session_id", "").strip()
-    user_text  = data.get("message", "").strip()
-    image_b64  = data.get("image", None)
+    data      = request.get_json()
+    sid       = data.get("session_id", "").strip()
+    user_text = data.get("message", "").strip()
+    image_b64 = data.get("image", None)
 
     if not sid or (not user_text and not image_b64):
         return jsonify({"error": "session_id and message/image are required"}), 400
 
     with get_db() as conn:
         session = conn.execute(
-            "SELECT id, title FROM sessions WHERE id = ?", (sid,)
+            "SELECT id, title FROM sessions WHERE id = %s", (sid,)
         ).fetchone()
 
     if not session:
@@ -227,7 +584,6 @@ def chat():
     if image_b64:
         db_text = user_text + "\n\n[Image Attached]" if user_text else "[Image Attached]"
 
-    # Persist user message
     with get_db() as conn:
         conn.execute(
             "INSERT INTO messages (session_id, role, content) VALUES (%s, %s, %s)",
@@ -235,13 +591,13 @@ def chat():
         )
         conn.commit()
 
-    # Auto-title session on first message
+    # Auto-title
     auto_titled = False
     if session["title"] == "New Chat":
         new_title = make_title(user_text)
         with get_db() as conn:
             conn.execute(
-                "UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE sessions SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (new_title, sid)
             )
             conn.commit()
@@ -249,42 +605,50 @@ def chat():
         session_title = new_title
     else:
         session_title = session["title"]
-        # touch updated_at
         with get_db() as conn:
             conn.execute(
-                "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (sid,)
+                "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (sid,)
             )
             conn.commit()
 
-    # Build context (last N messages for this session)
+    # Build conversation context
     with get_db() as conn:
         rows = conn.execute("""
             SELECT role, content FROM messages
-            WHERE session_id = ? ORDER BY id ASC
+            WHERE session_id = %s ORDER BY id ASC
         """, (sid,)).fetchall()
 
+    # ── Tool detection (skip for image-only messages) ─────────────────────────
+    tool_result = None
+    if user_text and not image_b64:
+        intent = detect_tool_intent(user_text)
+        if intent.get("tool") != "chat":
+            tool_result = execute_tool(intent, user_text)
+
+    # Build Gemini contents
     contents = []
-    for r in rows[:-1]: # exclude the last user message we just inserted (we handle it below)
+    for r in rows[:-1]:
         role = "user" if r["role"] == "user" else "model"
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=r["content"])]))
-    
     contents = contents[-MAX_CONTEXT:]
-    
-    # Process current turn (including image if present)
-    current_parts = [types.Part.from_text(text=user_text or "[Image Attached]")]
+
+    # Current turn parts
+    current_text = user_text or "[Image Attached]"
+    if tool_result:
+        current_text = f"{user_text}\n\n[TOOL_RESULT]: {tool_result}"
+
+    current_parts = [types.Part.from_text(text=current_text)]
     if image_b64:
         import base64
         try:
-            # Strip data:image/...;base64,
             if "," in image_b64:
                 image_b64 = image_b64.split(",")[1]
             image_bytes = base64.b64decode(image_b64)
             current_parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
         except Exception as e:
-            print("Error decoding image:", e)
-            
+            print("Image decode error:", e)
+
     contents.append(types.Content(role="user", parts=current_parts))
-    
 
     def generate():
         yield ": start\n\n"
@@ -297,36 +661,30 @@ def chat():
             )
 
             models_to_try = ["gemini-3.5-flash", "gemini-2.5-flash", "nvidia/nemotron-3-ultra-550b-a55b"]
-            stream_iter = None
-            first_chunk_text = None
-            last_error = None
+            stream_iter       = None
+            first_chunk_text  = None
+            last_error        = None
 
             for m_id in models_to_try:
                 try:
                     if m_id.startswith("nvidia/"):
                         if not nvidia_client:
                             continue
-                        # Use OpenAI SDK for Nvidia
-                        actual_model = m_id
-                        # Build openai messages format
                         oai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                         for r in rows:
                             role = "user" if r["role"] == "user" else "assistant"
                             oai_messages.append({"role": role, "content": r["content"]})
-                            
+                        if tool_result:
+                            oai_messages.append({"role": "user", "content": f"{user_text}\n\n[TOOL_RESULT]: {tool_result}"})
+
                         raw_stream = nvidia_client.chat.completions.create(
-                            model=actual_model,
-                            messages=oai_messages,
-                            temperature=0.72,
-                            top_p=0.9,
-                            stream=True
+                            model=m_id, messages=oai_messages,
+                            temperature=0.72, top_p=0.9, stream=True
                         )
-                        
                         def oai_iterator(stream):
                             for chunk in stream:
                                 if chunk.choices and chunk.choices[0].delta.content:
                                     yield chunk.choices[0].delta.content
-                                    
                         iterator = oai_iterator(raw_stream)
                         try:
                             first_chunk_text = next(iterator)
@@ -334,38 +692,31 @@ def chat():
                             first_chunk_text = None
                         stream_iter = iterator
                         break
-
                     else:
-                        # Use Google GenAI SDK
                         raw_stream = client.models.generate_content_stream(
-                            model=m_id,
-                            contents=contents,
-                            config=config
+                            model=m_id, contents=contents, config=config
                         )
                         def gemini_iterator(stream):
                             for chunk in stream:
                                 if chunk.text:
                                     yield chunk.text
-                                    
                         iterator = gemini_iterator(raw_stream)
                         try:
                             first_chunk_text = next(iterator)
                         except StopIteration:
                             first_chunk_text = None
                         stream_iter = iterator
-                        break  # Success! Stop falling back.
-                        
+                        break
                 except Exception as e:
                     err_str = str(e).lower()
-                    # Skip to next model on ANY model availability or traffic issue
                     if any(err in err_str for err in ["503", "429", "404", "unavailable", "demand", "not found"]):
                         last_error = e
                         continue
                     else:
                         raise e
-            
+
             if stream_iter is None:
-                raise last_error or Exception("All models failed to respond due to high demand.")
+                raise last_error or Exception("All models failed.")
 
             if auto_titled:
                 yield f"data: {json.dumps({'event': 'title', 'title': session_title})}\n\n"
@@ -379,22 +730,20 @@ def chat():
                     full_reply += token_text
                     yield f"data: {json.dumps({'event': 'chunk', 'text': token_text})}\n\n"
 
-            # Persist assistant reply
             with get_db() as conn:
                 conn.execute(
-                    "INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)",
-                    (sid, full_reply)
+                    "INSERT INTO messages (session_id, role, content) VALUES (%s, %s, %s)",
+                    (sid, 'assistant', full_reply)
                 )
                 conn.commit()
 
             yield f"data: {json.dumps({'event': 'done'})}\n\n"
 
         except Exception as e:
-            # Roll back orphaned user message
             with get_db() as conn:
                 conn.execute("""
                     DELETE FROM messages WHERE id = (
-                        SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user'
+                        SELECT MAX(id) FROM messages WHERE session_id = %s AND role = 'user'
                     )
                 """, (sid,))
                 conn.commit()

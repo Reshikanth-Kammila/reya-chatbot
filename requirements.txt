@@ -5,3 +5,8 @@ python-dotenv
 gunicorn
 psycopg2-binary
 openai
+resend
+google-auth
+google-auth-oauthlib
+google-api-python-client
+requests
