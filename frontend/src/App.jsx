@@ -164,7 +164,7 @@ function App() {
                      setTyping(false);
                   }
                 } catch (e) {
-                  // ignore parse error for incomplete JSON chunk (should not happen with \n\n split)
+                  console.error("Failed to parse stream event", e, line);
                 }
               }
             }
@@ -173,6 +173,14 @@ function App() {
       }
     } catch (err) {
       console.error('Chat error', err);
+    } finally {
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].role === 'assistant' && !newMsgs[newMsgs.length - 1].content) {
+          newMsgs[newMsgs.length - 1].content = "**Error:** The AI service timed out or is overloaded (API limits reached). Please try again.";
+        }
+        return newMsgs;
+      });
       setTyping(false);
     }
   };
